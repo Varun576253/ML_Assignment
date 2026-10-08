@@ -262,3 +262,59 @@ def select_model(
         na_position="first",
     ).reset_index(drop=True)
     return record, results
+
+
+def evaluate_ridge_alphas(
+    X: pd.DataFrame,
+    y: pd.Series,
+    degree: int,
+    alphas: tuple[float, ...],
+    label: str = "problem",
+) -> pd.DataFrame:
+    """Evaluate additional Ridge alphas on the same repeated-CV folds.
+
+    Polynomial features are generated once. Each fold fits its scaler only on
+    its training rows, matching ``select_model`` exactly. This is used for a
+    small local alpha refinement after the full degree search.
+    """
+    if not alphas:
+        raise ValueError("At least one Ridge alpha is required.")
+    X_array = np.asarray(X, dtype=float)
+    y_array = np.asarray(y, dtype=float)
+    design = PolynomialFeatures(degree=degree, include_bias=False).fit_transform(X_array)
+    cv = RepeatedKFold(
+        n_splits=N_SPLITS,
+        n_repeats=N_REPEATS,
+        random_state=RANDOM_SEED,
+    )
+    splits = list(cv.split(X_array, y_array))
+    candidates = {
+        float(alpha): _new_candidate("Ridge", degree, float(alpha), design.shape[1])
+        for alpha in alphas
+    }
+
+    for train_index, validation_index in splits:
+        scaler = StandardScaler()
+        train_design = scaler.fit_transform(design[train_index])
+        validation_design = scaler.transform(design[validation_index])
+        y_train = y_array[train_index]
+        y_validation = y_array[validation_index]
+        scores = _ridge_fold_metrics(
+            train_design,
+            validation_design,
+            y_train,
+            y_validation,
+            tuple(candidates),
+        )
+        for alpha, (train_score, validation_score) in scores.items():
+            row = candidates[alpha]
+            row["fold_training_mse"].append(train_score[0])
+            row["fold_training_r2"].append(train_score[1])
+            row["fold_validation_mse"].append(validation_score[0])
+            row["fold_validation_r2"].append(validation_score[1])
+
+    results = pd.DataFrame(
+        [_finish_candidate(row, len(splits)) for row in candidates.values()]
+    )
+    print(f"{label}: completed focused alpha refinement at degree {degree}", flush=True)
+    return results.sort_values("alpha").reset_index(drop=True)

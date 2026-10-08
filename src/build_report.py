@@ -405,7 +405,7 @@ def build() -> Path:
     story.append(para("Why these models were selected", style["h2"]))
     story.append(
         para(
-            f"<b>var1:</b> Degree 5 with Ridge alpha 10 achieved the lowest mean validation MSE "
+            f"<b>var1:</b> Degree 5 with Ridge alpha {float(var1['alpha']):g} achieved the lowest mean validation MSE "
             f"({var1['mean_validation_mse']:.6f}; R-squared {var1['mean_validation_r2']:.6f}) among all tested "
             f"settings. Its 461 monomials keep the model below the 800-row fold size. At degree 10, the best "
             f"Ridge model's training MSE was lower ({float(best_var1_degree_10['mean_training_mse']):.3f} versus "
@@ -417,16 +417,20 @@ def build() -> Path:
     )
     story.append(
         para(
-            f"<b>var2:</b> Degree 11 with alpha 1 had the minimum mean validation MSE "
+            f"<b>var2:</b> Degree 11 with alpha 1 had the minimum raw cross-validation MSE "
             f"({float(best2['mean_validation_mse']):.6f}; R-squared {float(best2['mean_validation_r2']):.6f}). "
-            f"Degree 10 with alpha 1 scored {var2['mean_validation_mse']:.6f}, below the one-standard-error "
-            f"cutoff of {var2['one_se_cutoff_mse']:.6f}, and uses 285 terms rather than degree 11's "
+            "Degree 11 achieved the lowest raw cross-validation MSE. However, degree 10 was selected using "
+            "the one-standard-error rule because its validation error was within one standard error of the "
+            "minimum while requiring fewer polynomial terms. "
+            f"Degree 10 with alpha {float(var2['alpha']):g} scored {var2['mean_validation_mse']:.6f}, below "
+            f"the one-standard-error cutoff of {var2['one_se_cutoff_mse']:.6f}, and uses "
+            f"{int(var2['polynomial_terms'])} terms rather than degree 11's "
             f"{int(best2['polynomial_terms'])} terms. From degree 11 to 15, the best-per-degree training MSE "
             f"fell from {float(best2['mean_training_mse']):.3f} to "
             f"{float(best_var2_degree_15['mean_training_mse']):.3f}, while validation MSE rose from "
             f"{float(best2['mean_validation_mse']):.3f} to "
-            f"{float(best_var2_degree_15['mean_validation_mse']):.3f}; the lower degree was retained for the "
-            "generalization tradeoff.",
+            f"{float(best_var2_degree_15['mean_validation_mse']):.3f}; this supports the lower-complexity "
+            "one-standard-error choice.",
             style["body"],
         )
     )
@@ -440,7 +444,32 @@ def build() -> Path:
             format_number(chosen["mean_validation_r2"], 4),
         ])
     story.append(styled_table(train_val, [62, 112, 112, 123, 121], row_padding=5, font_size=6.9))
-    story.append(Spacer(1, 7))
+    story.append(Spacer(1, 6))
+    story.append(para("Focused Ridge alpha refinement", style["h2"]))
+    story.append(
+        para(
+            "The local alpha grids were var1: 1, 3, 5, 7, 10, 15, 20, 30, 50 and var2: "
+            "0.1, 0.3, 0.5, 0.7, 1, 1.5, 2, 3, 5. They used the same 10 validation folds and "
+            "fold-local scaling. A candidate was adopted only with at least 1% lower mean CV MSE and "
+            "a paired mean fold improvement greater than its paired standard error. Var1 alpha 20 met "
+            "both safeguards, so the complete var1 degree search was rerun with the focused values added; "
+            "var2 retained alpha 1.",
+            style["small"],
+        )
+    )
+    refinement_rows = [["Problem", "Baseline alpha", "Best local alpha", "Local CV MSE", "Paired improvement (SE)", "Decision"]]
+    for v in ("var1", "var2"):
+        refinement = selections[v]["alpha_refinement"]
+        refinement_rows.append([
+            v,
+            f"{refinement['baseline_alpha']:g}",
+            f"{refinement['best_local_alpha']:g}",
+            format_number(refinement["best_local_mean_validation_mse"], 6),
+            f"{refinement['paired_mean_mse_improvement']:.6g} ({refinement['paired_se_mse_improvement']:.3g})",
+            "Accepted" if refinement["meaningful_improvement"] else f"Kept {refinement['final_alpha']:g}",
+        ])
+    story.append(styled_table(refinement_rows, [45, 73, 73, 85, 133, 90], row_padding=4, font_size=6.6))
+    story.append(Spacer(1, 6))
     story.append(para("Final prediction procedure", style["h2"]))
     story.append(
         para(
@@ -455,11 +484,11 @@ def build() -> Path:
     story.append(para("Reproduction", style["h2"]))
     story.append(
         para(
-            "From the project root, install requirements.txt and run "
+            "From the project root, place the instructor-provided CSV files in data/, install requirements.txt, and run "
             "<font face='Courier'>python src/train_and_predict.py</font>. This recreates the CV tables, diagnostics, "
             "selection summary, and both prediction files. Run "
             "<font face='Courier'>python src/build_report.py</font> to regenerate this report. The project and "
-            "assigned data copies are intended for the provided GitHub repository: "
+            "training code are available in the provided GitHub repository: "
             "<link href='https://github.com/Varun576253/ML_Assignment' color='#2F6B91'>github.com/Varun576253/ML_Assignment</link>.",
             style["small"],
         )

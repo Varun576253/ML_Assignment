@@ -13,13 +13,144 @@ import numpy as np
 import pandas as pd
 import sklearn
 
-from model_selection import RANDOM_SEED, make_pipeline, select_model
+from model_selection import (
+    RANDOM_SEED,
+    RIDGE_ALPHAS,
+    evaluate_ridge_alphas,
+    make_pipeline,
+    select_model,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = PROJECT_ROOT / "data"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs"
 PROBLEMS = {"var1": 10, "var2": 20}
+FOCUSED_ALPHAS = {
+    "var1": (1.0, 3.0, 5.0, 7.0, 10.0, 15.0, 20.0, 30.0, 50.0),
+    "var2": (0.1, 0.3, 0.5, 0.7, 1.0, 1.5, 2.0, 3.0, 5.0),
+}
+MIN_RELATIVE_MSE_IMPROVEMENT = 0.01
+
+
+def _fold_values(value: str) -> np.ndarray:
+    return np.asarray([float(item) for item in value.split(";")], dtype=float)
+
+
+def _refine_alpha(
+    X: pd.DataFrame,
+    y: pd.Series,
+    variable: str,
+    selected: dict[str, Any],
+    cv_results: pd.DataFrame,
+    output_dir: Path,
+) -> tuple[dict[str, Any], pd.DataFrame, dict[str, Any]]:
+    """Compare a focused alpha set on the existing degree and CV procedure."""
+    if selected["family"] != "Ridge" or selected["alpha"] is None:
+        raise ValueError(f"Expected the established Ridge selection for {variable}.")
+
+    degree = int(selected["degree"])
+    baseline_alpha = float(selected["alpha"])
+    focused = FOCUSED_ALPHAS[variable]
+    known_alphas = tuple(float(alpha) for alpha in selected["ridge_alphas"])
+    missing_alphas = tuple(alpha for alpha in focused if alpha not in known_alphas)
+    new_results = (
+        evaluate_ridge_alphas(X, y, degree, missing_alphas, label=variable)
+        if missing_alphas
+        else pd.DataFrame()
+    )
+    base = cv_results[
+        (cv_results["family"] == "Ridge")
+        & (cv_results["degree"] == degree)
+        & np.isclose(cv_results["alpha"], baseline_alpha)
+    ].iloc[0]
+    base_folds = _fold_values(base["fold_validation_mse"])
+
+    candidate_records: list[dict[str, Any]] = []
+    for alpha in focused:
+        if alpha in known_alphas:
+            row = cv_results[
+                (cv_results["family"] == "Ridge")
+                & (cv_results["degree"] == degree)
+                & np.isclose(cv_results["alpha"], alpha)
+            ].iloc[0]
+        else:
+            row = new_results[np.isclose(new_results["alpha"], alpha)].iloc[0]
+        folds = _fold_values(row["fold_validation_mse"])
+        improvement_by_fold = base_folds - folds
+        paired_mean = float(improvement_by_fold.mean())
+        paired_se = float(improvement_by_fold.std(ddof=1) / np.sqrt(len(improvement_by_fold)))
+        relative = float(
+            (float(base["mean_validation_mse"]) - float(row["mean_validation_mse"]))
+            / float(base["mean_validation_mse"])
+        )
+        candidate_records.append(
+            {
+                "alpha": float(alpha),
+                "degree": degree,
+                "mean_validation_mse": float(row["mean_validation_mse"]),
+                "mean_validation_r2": float(row["mean_validation_r2"]),
+                "se_validation_mse": float(row["se_validation_mse"]),
+                "relative_mse_improvement_vs_baseline": relative,
+                "paired_mean_mse_improvement_vs_baseline": paired_mean,
+                "paired_se_mse_improvement": paired_se,
+                "fold_validation_mse": row["fold_validation_mse"],
+                "is_baseline_alpha": bool(np.isclose(alpha, baseline_alpha)),
+            }
+        )
+    refinement = pd.DataFrame(candidate_records).sort_values("alpha").reset_index(drop=True)
+    best_local = refinement.sort_values("mean_validation_mse").iloc[0]
+    relative_improvement = float(best_local["relative_mse_improvement_vs_baseline"])
+    paired_improvement = float(best_local["paired_mean_mse_improvement_vs_baseline"])
+    paired_se = float(best_local["paired_se_mse_improvement"])
+    meaningful = bool(
+        not np.isclose(float(best_local["alpha"]), baseline_alpha)
+        and relative_improvement >= MIN_RELATIVE_MSE_IMPROVEMENT
+        and paired_improvement > paired_se
+    )
+
+    rerun = False
+    final_selected = selected
+    final_results = cv_results
+    if meaningful:
+        expanded_alphas = tuple(sorted(set(RIDGE_ALPHAS).union(focused)))
+        final_selected, final_results = select_model(
+            X,
+            y,
+            max_degree=PROBLEMS[variable],
+            label=f"{variable} refined full search",
+            ridge_alphas=expanded_alphas,
+        )
+        rerun = True
+
+    refinement["final_selected"] = (
+        (refinement["degree"] == int(final_selected["degree"]))
+        & np.isclose(refinement["alpha"], float(final_selected["alpha"]))
+    )
+    refinement.to_csv(
+        output_dir / f"alpha_refinement_{variable}.csv",
+        index=False,
+        float_format="%.12g",
+    )
+    record = {
+        "baseline_degree": degree,
+        "baseline_alpha": baseline_alpha,
+        "baseline_mean_validation_mse": float(base["mean_validation_mse"]),
+        "focused_alphas": list(focused),
+        "best_local_alpha": float(best_local["alpha"]),
+        "best_local_mean_validation_mse": float(best_local["mean_validation_mse"]),
+        "best_local_mean_validation_r2": float(best_local["mean_validation_r2"]),
+        "relative_mse_improvement": relative_improvement,
+        "paired_mean_mse_improvement": paired_improvement,
+        "paired_se_mse_improvement": paired_se,
+        "minimum_relative_mse_improvement": MIN_RELATIVE_MSE_IMPROVEMENT,
+        "meaningful_improvement": meaningful,
+        "decision": "accepted; reran full degree search" if meaningful else "retained baseline",
+        "full_search_rerun": rerun,
+        "final_degree": int(final_selected["degree"]),
+        "final_alpha": float(final_selected["alpha"]),
+    }
+    return final_selected, final_results, record
 
 
 def _json_value(value: Any) -> Any:
@@ -142,6 +273,14 @@ def run(data_dir: Path, output_dir: Path) -> dict[str, Any]:
             max_degree=max_degree,
             label=variable,
         )
+        selected, cv_results, alpha_refinement = _refine_alpha(
+            X_train,
+            y_train,
+            variable,
+            selected,
+            cv_results,
+            output_dir,
+        )
         cv_path = output_dir / f"model_selection_{variable}.csv"
         cv_results.to_csv(cv_path, index=False, float_format="%.12g")
 
@@ -163,8 +302,11 @@ def run(data_dir: Path, output_dir: Path) -> dict[str, Any]:
         written = pd.read_csv(prediction_path)
         if written.columns.tolist() != ["y"] or len(written) != 1000:
             raise ValueError(f"Invalid prediction CSV schema or row count: {prediction_path}")
-        if not np.isfinite(written["y"].to_numpy(dtype=float)).all():
+        written_predictions = written["y"].to_numpy(dtype=float)
+        if not np.isfinite(written_predictions).all():
             raise ValueError(f"Invalid prediction values written to {prediction_path}")
+        if not np.allclose(written_predictions, predictions, rtol=0.0, atol=5e-13):
+            raise ValueError(f"Written predictions changed values or row order: {prediction_path}")
 
         report["problems"][variable] = {
             "max_allowed_degree": max_degree,
@@ -173,6 +315,7 @@ def run(data_dir: Path, output_dir: Path) -> dict[str, Any]:
             "n_features": int(len(feature_columns)),
             "features": feature_columns,
             "selected": selected,
+            "alpha_refinement": alpha_refinement,
             "cv_results_file": cv_path.name,
             "prediction_file": filename,
             "prediction_min": float(predictions.min()),
