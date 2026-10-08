@@ -537,7 +537,7 @@ def build_report() -> Path:
                 s["small"],
             ),
             paragraph(
-                "Code: src/model_selection.py implements fold-safe polynomial model selection; src/train_and_predict.py handles input checks, final fitting, predictions, and CSV validation; src/build_report.py generates this report. Repository: github.com/Varun576253/ML_Assignment.",
+                "Code: src/model_selection.py implements fold-safe polynomial model selection; src/train_and_predict.py handles input checks, final fitting, predictions, and CSV validation; src/build_report.py generates this report. Repository: <link href=\"https://github.com/Varun576253/ML_Assignment\" color=\"#215A8E\">github.com/Varun576253/ML_Assignment</link>.",
                 s["small"],
             ),
         ]
