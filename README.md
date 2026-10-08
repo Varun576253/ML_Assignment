@@ -46,7 +46,7 @@ Model selection uses shuffled 5-fold cross-validation repeated twice (10 validat
 
 ## 6. Reproduction
 
-Use Python 3.12. Place the instructor-provided files listed below in `data/` before running the commands. The datasets and assignment PDF are not required to be committed to the repository. The scripts read the input files without modifying them.
+To reproduce my results, place the five instructor-provided CSV files listed below in `data/`. I used Python 3.12. From the project root, run these commands in Windows PowerShell to create the environment, install the required packages, repeat model selection, and generate the prediction files. The input files are read without modification.
 
 Required input files:
 
@@ -58,15 +58,12 @@ data/BT2024146_test_var2.csv
 data/sample_submission.csv
 ```
 
-From the project root, run these commands in Windows PowerShell, one at a time:
-
 ```powershell
 python --version
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 python src/train_and_predict.py
-python src/build_report.py
 ```
 
-The training script performs model selection, refits the final pipelines, and writes predictions and selection results to `outputs/`. The report builder reads those current results to create `report/report.pdf`. To use a different input directory, pass `--data-dir PATH` to the training script. Use the default `outputs/` location when the report should describe the latest run.
+The training script performs model selection, refits the final pipelines, and writes prediction and selection results to `outputs/`. The final report is included at `report/report.pdf`. To use a different input directory, pass `--data-dir PATH` to the training script.
