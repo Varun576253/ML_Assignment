@@ -1,319 +1,377 @@
-"""Build a concise report from the final model-selection outputs."""
+"""Build the concise assignment report from the current model outputs."""
 
 from __future__ import annotations
 
+import csv
 import json
+import math
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import letter
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.lib.units import mm
+from reportlab.platypus import (
+    PageBreak,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUTS = ROOT / "outputs"
-OUT_PDF = ROOT / "report" / "report.pdf"
-NAVY = colors.HexColor("#18324B")
-BLUE = colors.HexColor("#2F6B91")
-PALE_BLUE = colors.HexColor("#EAF2F8")
-LIGHT_GRAY = colors.HexColor("#F1F4F6")
-WHITE = colors.white
-PROBLEMS = ("var1", "var2")
-TARGET_NAMES = {"var1": "Net Power Score", "var2": "Thermal Anomaly Score"}
+OUTPUT_DIR = ROOT / "outputs"
+REPORT_DIR = ROOT / "report"
+REPORT_PATH = REPORT_DIR / "report.pdf"
+
+INK = colors.HexColor("#172B4D")
+BLUE = colors.HexColor("#215A8E")
+PALE_BLUE = colors.HexColor("#EAF1F8")
+MID_GREY = colors.HexColor("#536579")
+LIGHT_GREY = colors.HexColor("#D9E1EA")
 
 
-def make_styles():
+def load_json(path: Path) -> Any:
+    if not path.is_file():
+        raise FileNotFoundError(f"Required result file not found: {path}")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def validate_prediction(path: Path) -> int:
+    """Check the submission schema and all prediction values before reporting."""
+    with path.open("r", encoding="utf-8-sig", newline="") as file:
+        reader = csv.reader(file)
+        header = next(reader, None)
+        if header != ["y"]:
+            raise ValueError(f"{path.name} must contain exactly one column named 'y'.")
+        count = 0
+        for row in reader:
+            if len(row) != 1:
+                raise ValueError(f"{path.name} contains an unexpected index or extra column.")
+            value = float(row[0])
+            if not math.isfinite(value):
+                raise ValueError(f"{path.name} contains a non-finite prediction.")
+            count += 1
+    if count != 1000:
+        raise ValueError(f"{path.name} must contain exactly 1000 predictions; found {count}.")
+    return count
+
+
+def get_cv_row(variable: str, degree: int, family: str, alpha: float) -> pd.Series:
+    path = OUTPUT_DIR / f"model_selection_{variable}.csv"
+    if not path.is_file():
+        raise FileNotFoundError(f"Required model-selection file not found: {path}")
+    results = pd.read_csv(path)
+    matches = results[
+        (results["family"] == family)
+        & (results["degree"].astype(int) == degree)
+        & (pd.to_numeric(results["alpha"], errors="coerce").sub(alpha).abs() < 1e-12)
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"Expected one {family} degree {degree}, alpha {alpha:g} row in {path.name}."
+        )
+    return matches.iloc[0]
+
+
+def fmt(value: float, digits: int = 6) -> str:
+    return f"{float(value):.{digits}f}"
+
+
+def styles() -> dict[str, ParagraphStyle]:
     base = getSampleStyleSheet()
     return {
+        "eyebrow": ParagraphStyle(
+            "Eyebrow", parent=base["Normal"], fontName="Helvetica-Bold",
+            fontSize=8, leading=10, textColor=BLUE, spaceAfter=5,
+        ),
         "title": ParagraphStyle(
             "ReportTitle", parent=base["Title"], fontName="Helvetica-Bold",
-            fontSize=21, leading=25, textColor=NAVY, alignment=0, spaceAfter=4,
+            fontSize=22, leading=26, alignment=TA_LEFT, textColor=INK,
+            spaceAfter=4,
         ),
         "subtitle": ParagraphStyle(
-            "ReportSubtitle", parent=base["Normal"], fontName="Helvetica",
-            fontSize=9, leading=12, textColor=colors.HexColor("#5D6975"), spaceAfter=10,
+            "Subtitle", parent=base["Normal"], fontSize=10, leading=14,
+            textColor=MID_GREY, spaceAfter=12,
         ),
-        "h1": ParagraphStyle(
-            "SectionHeading", parent=base["Heading1"], fontName="Helvetica-Bold",
-            fontSize=13, leading=16, textColor=NAVY, spaceBefore=5, spaceAfter=5,
-            keepWithNext=True,
-        ),
-        "h2": ParagraphStyle(
-            "Subheading", parent=base["Heading2"], fontName="Helvetica-Bold",
-            fontSize=9.5, leading=12, textColor=BLUE, spaceBefore=6, spaceAfter=3,
-            keepWithNext=True,
+        "section": ParagraphStyle(
+            "Section", parent=base["Heading2"], fontName="Helvetica-Bold",
+            fontSize=12, leading=15, textColor=BLUE, spaceBefore=7, spaceAfter=5,
         ),
         "body": ParagraphStyle(
-            "ReportBody", parent=base["BodyText"], fontName="Helvetica",
-            fontSize=8.2, leading=11, textColor=colors.HexColor("#253443"),
-            spaceAfter=5,
+            "Body", parent=base["BodyText"], fontName="Helvetica",
+            fontSize=9.1, leading=13, textColor=INK, spaceAfter=6,
         ),
         "small": ParagraphStyle(
-            "ReportSmall", parent=base["BodyText"], fontName="Helvetica",
-            fontSize=7.2, leading=9.2, textColor=colors.HexColor("#253443"),
-            spaceAfter=3,
+            "Small", parent=base["BodyText"], fontName="Helvetica",
+            fontSize=8.2, leading=11, textColor=MID_GREY, spaceAfter=4,
+        ),
+        "table_head": ParagraphStyle(
+            "TableHead", parent=base["BodyText"], fontName="Helvetica-Bold",
+            fontSize=8.2, leading=10, textColor=colors.white,
         ),
         "table": ParagraphStyle(
-            "TableBody", fontName="Helvetica", fontSize=7.1, leading=8.6,
-            textColor=colors.HexColor("#253443"),
+            "TableBody", parent=base["BodyText"], fontName="Helvetica",
+            fontSize=8.4, leading=11, textColor=INK,
         ),
-        "table_header": ParagraphStyle(
-            "TableHeader", fontName="Helvetica-Bold", fontSize=7.1, leading=8.6,
-            textColor=WHITE,
+        "table_small": ParagraphStyle(
+            "TableSmall", parent=base["BodyText"], fontName="Helvetica",
+            fontSize=7.8, leading=10, textColor=INK,
         ),
-        "callout": ParagraphStyle(
-            "Callout", parent=base["BodyText"], fontName="Helvetica-Bold",
-            fontSize=8.2, leading=10.5, textColor=NAVY,
+        "center": ParagraphStyle(
+            "Center", parent=base["BodyText"], fontName="Helvetica",
+            fontSize=8.2, leading=10, alignment=TA_CENTER, textColor=INK,
         ),
     }
 
 
-def make_table(rows, widths, styles, font_size=7.1, padding=4):
-    body_style = ParagraphStyle(
-        "SizedTableBody", parent=styles["table"],
-        fontSize=font_size, leading=font_size + 1.5,
+def para(text: str, style: ParagraphStyle) -> Paragraph:
+    return Paragraph(text, style)
+
+
+def styled_table(
+    rows: list[list[Any]], widths: list[float], *, repeat_rows: int = 1
+) -> Table:
+    table = Table(rows, colWidths=widths, repeatRows=repeat_rows, hAlign="LEFT")
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), BLUE),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 7),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("LINEBELOW", (0, 0), (-1, 0), 0.5, BLUE),
+                ("LINEBELOW", (0, 1), (-1, -1), 0.35, LIGHT_GREY),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, PALE_BLUE]),
+            ]
+        )
     )
-    header_style = ParagraphStyle(
-        "SizedTableHeader", parent=styles["table_header"],
-        fontSize=font_size, leading=font_size + 1.5,
-    )
-    converted = []
-    for row_index, row in enumerate(rows):
-        cell_style = header_style if row_index == 0 else body_style
-        converted.append([
-            value if isinstance(value, Paragraph) else Paragraph(str(value), cell_style)
-            for value in row
-        ])
-    table = Table(converted, colWidths=widths, repeatRows=1, hAlign="LEFT")
-    commands = [
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 5),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-        ("TOPPADDING", (0, 0), (-1, -1), padding),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), padding),
-        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#D5DEE5")),
-        ("BACKGROUND", (0, 0), (-1, 0), NAVY),
-    ]
-    for row_index in range(2, len(rows), 2):
-        commands.append(("BACKGROUND", (0, row_index), (-1, row_index), LIGHT_GRAY))
-    table.setStyle(TableStyle(commands))
     return table
 
 
-def decorate_page(canvas, doc):
+def page_chrome(canvas: Any, document: Any) -> None:
     canvas.saveState()
-    canvas.setFillColor(colors.HexColor("#5D6975"))
-    canvas.setFont("Helvetica", 7)
-    canvas.drawString(40, 23, "Polynomial regression | Hidden test labels unavailable")
-    canvas.drawRightString(letter[0] - 40, 23, f"Page {doc.page}")
+    width, _ = A4
+    canvas.setStrokeColor(LIGHT_GREY)
+    canvas.setLineWidth(0.5)
+    canvas.line(document.leftMargin, 17 * mm, width - document.rightMargin, 17 * mm)
+    canvas.setFont("Helvetica", 8)
+    canvas.setFillColor(MID_GREY)
+    canvas.drawString(document.leftMargin, 11.5 * mm, "BT2024146  |  ML Assignment 1")
+    canvas.drawRightString(width - document.rightMargin, 11.5 * mm, f"Page {document.page}")
     canvas.restoreState()
 
 
-def load_outputs():
-    summary = json.loads((OUTPUTS / "selection_summary.json").read_text(encoding="utf-8"))
-    diagnostics = {
-        item["variable"]: item
-        for item in json.loads((OUTPUTS / "data_diagnostics.json").read_text(encoding="utf-8"))
-    }
-    cv = {name: pd.read_csv(OUTPUTS / f"model_selection_{name}.csv") for name in PROBLEMS}
-    return summary["problems"], diagnostics, cv
-
-
-def best_ridge(results: pd.DataFrame, degree: int) -> pd.Series:
-    subset = results[(results["family"] == "Ridge") & (results["degree"] == degree)]
-    return subset.sort_values("mean_validation_mse").iloc[0]
-
-
-def build() -> Path:
-    selections, diagnostics, cv = load_outputs()
-    styles = make_styles()
-    OUT_PDF.parent.mkdir(parents=True, exist_ok=True)
-    doc = SimpleDocTemplate(
-        str(OUT_PDF), pagesize=letter, leftMargin=40, rightMargin=40,
-        topMargin=47, bottomMargin=40,
-        title="BT2024146 Polynomial Regression Assignment Report",
-        author="BT2024146",
-        subject="Polynomial regression model selection for var1 and var2",
-    )
-    story = []
-
-    # Page 1: problem setup, data checks, and the validation method.
-    story.extend([
-        Paragraph("Polynomial Regression", styles["title"]),
-        Paragraph("Machine Learning Assignment 1 | Roll No. BT2024146", styles["subtitle"]),
-        Paragraph(
-            "Two separate regression tasks predict the assigned target variables from their input features. "
-            "Each task has 1,000 training rows and 1,000 test rows. The assignment limits total polynomial "
-            "degree to 10 for var1 and 20 for var2; hidden test labels were unavailable.",
-            styles["body"],
-        ),
-        Paragraph("Problems and data", styles["h1"]),
-    ])
-
-    overview = [["Problem", "Features", "Target", "Train / test", "Target range", "Max degree"]]
-    for name in PROBLEMS:
-        item = diagnostics[name]
-        target = item["target_summary"]
-        overview.append([
-            name,
-            f"{len(item['feature_columns'])}: " + ", ".join(item["feature_columns"]),
-            TARGET_NAMES[name],
-            f"{item['train_shape'][0]:,} / {item['test_shape'][0]:,}",
-            f"{target['min']:.2f} to {target['max']:.2f}",
-            str(selections[name]["max_allowed_degree"]),
-        ])
-    story.append(make_table(overview, [48, 100, 145, 76, 103, 60], styles, padding=5))
-    feature_ranges = [
-        value
-        for item in diagnostics.values()
-        for value in item["feature_ranges_train"].values()
+def build_report() -> Path:
+    summary = load_json(OUTPUT_DIR / "selection_summary.json")
+    diagnostics = load_json(OUTPUT_DIR / "data_diagnostics.json")
+    by_variable = {record["variable"]: record for record in diagnostics}
+    problems = summary["problems"]
+    validation = summary["validation"]
+    for variable in ("var1", "var2"):
+        diagnostic = by_variable[variable]
+        if not diagnostic["train_schema_matches_test_features"]:
+            raise ValueError(f"Input feature schemas do not match for {variable}.")
+        if any(diagnostic["train_missing_by_column"].values()) or any(
+            diagnostic["test_missing_by_column"].values()
+        ):
+            raise ValueError(f"Missing input values were recorded for {variable}.")
+    feature_bounds = [
+        bound
+        for diagnostic in diagnostics
+        for split_name in ("feature_ranges_train", "feature_ranges_test")
+        for bound in diagnostic[split_name].values()
     ]
-    feature_min = min(value[0] for value in feature_ranges)
-    feature_max = max(value[1] for value in feature_ranges)
-    train_dups = sum(item["train_duplicate_rows"] for item in diagnostics.values())
-    test_dups = [diagnostics[name]["test_duplicate_feature_rows"] for name in PROBLEMS]
-    missing = sum(sum(item["train_missing_by_column"].values()) + sum(item["test_missing_by_column"].values()) for item in diagnostics.values())
-    story.append(Spacer(1, 5))
-    story.append(Paragraph(
-        f"Observed checks: feature range {feature_min:.0f} to {feature_max:.0f}; {missing} missing values; "
-        f"{train_dups} duplicate training rows; test feature duplicates: {test_dups[0]} (var1), "
-        f"{test_dups[1]} (var2). Duplicate test rows were kept in their supplied order.",
-        styles["small"],
-    ))
+    feature_min = min(float(bound[0]) for bound in feature_bounds)
+    feature_max = max(float(bound[1]) for bound in feature_bounds)
 
-    story.extend([
-        Paragraph("Validation and method", styles["h1"]),
-        Paragraph(
-            "Model comparisons use shuffled RepeatedKFold cross-validation with 5 folds and 2 repeats "
-            "(10 validation folds total; random seed 2026). Each fold trains on 800 rows and validates on 200. "
-            "The repeated splits reduce dependence on one random partition while keeping the full permitted "
-            "degree searches practical.",
-            styles["body"],
-        ),
-        Paragraph(
-            "PolynomialFeatures expands all monomials up to each candidate total degree. Ridge regression "
-            "searched degrees 1-10 for var1 and 1-20 for var2, with the configured alpha grid at every degree. "
-            "Unregularized least squares "
-            "was also evaluated where the expanded feature count was below 800. The one-standard-error rule "
-            "selects the lowest degree within one fold-to-fold standard error of the minimum mean validation MSE.",
-            styles["body"],
-        ),
-        Paragraph(
-            "Leakage control: polynomial expansion is deterministic, and StandardScaler is fitted only on each "
-            "fold's training rows before transforming that fold's validation rows. After selection, each final "
-            "pipeline is refit on all 1,000 labeled rows. MSE and R-squared are averaged over validation folds.",
-            styles["body"],
-        ),
-    ])
+    selected: dict[str, dict[str, Any]] = {}
+    for variable, expected_degree, expected_alpha in (("var1", 5, 20.0), ("var2", 10, 1.0)):
+        record = problems[variable]["selected"]
+        if (
+            record["family"] != "Ridge"
+            or int(record["degree"]) != expected_degree
+            or not math.isclose(float(record["alpha"]), expected_alpha)
+        ):
+            raise ValueError(f"Current selected model for {variable} does not match the final solution.")
+        selected[variable] = record
 
-    # Page 2: selected models, the one-SE decision, and prediction/reproduction details.
-    story.append(PageBreak())
-    story.append(Paragraph("Results and final predictions", styles["h1"]))
-    model_rows = [["Problem", "Selected polynomial Ridge", "Terms", "CV MSE", "CV R-squared"]]
-    for name in PROBLEMS:
-        selected = selections[name]["selected"]
-        model_rows.append([
-            name,
-            f"Degree {selected['degree']}, alpha {selected['alpha']:g}",
-            f"{selected['polynomial_terms']:,}",
-            f"{selected['mean_validation_mse']:.6f}",
-            f"{selected['mean_validation_r2']:.6f}",
-        ])
-    story.append(make_table(model_rows, [55, 190, 65, 95, 110], styles, padding=5))
-    story.append(Spacer(1, 6))
+    var2_raw = pd.read_csv(OUTPUT_DIR / "model_selection_var2.csv")
+    raw_min = var2_raw.loc[var2_raw["mean_validation_mse"].idxmin()]
+    var2_degree10 = get_cv_row("var2", 10, "Ridge", 1.0)
+    var2_degree11 = get_cv_row("var2", 11, "Ridge", 1.0)
+    if int(raw_min["degree"]) != 11:
+        raise ValueError("The current var2 raw minimum is not degree 11; review the result files.")
+    if int(var2_degree10["polynomial_terms"]) >= int(var2_degree11["polynomial_terms"]):
+        raise ValueError("Expected degree 10 to use fewer polynomial terms than degree 11.")
 
-    selected2 = selections["var2"]["selected"]
-    raw_min2 = cv["var2"].loc[cv["var2"]["mean_validation_mse"].idxmin()]
-    if int(raw_min2["degree"]) == 11 and int(selected2["degree"]) == 10:
-        var2_selection_text = (
-            "Degree 11 achieved the lowest raw cross-validation MSE. However, degree 10 was selected using "
-            "the one-standard-error rule because its validation error was within one standard error of the "
-            "minimum while requiring fewer polynomial terms."
+    prediction_counts = {
+        variable: validate_prediction(OUTPUT_DIR / problems[variable]["prediction_file"])
+        for variable in ("var1", "var2")
+    }
+
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    document = SimpleDocTemplate(
+        str(REPORT_PATH),
+        pagesize=A4,
+        rightMargin=19 * mm,
+        leftMargin=19 * mm,
+        topMargin=18 * mm,
+        bottomMargin=22 * mm,
+        title="ML Assignment 1 — Polynomial Regression",
+        author="BT2024146",
+        subject="Polynomial regression methodology and final validation results",
+    )
+    s = styles()
+    story: list[Any] = []
+
+    # Page 1: task, methodology, and validated model choices.
+    fold_count = int(validation["n_splits"]) * int(validation["n_repeats"])
+    train_rows = int(round(1000 * float(validation["train_fraction_per_fold"])))
+    validation_rows_count = int(round(1000 * float(validation["validation_fraction_per_fold"])))
+    story.extend(
+        [
+            para("MACHINE LEARNING ASSIGNMENT 1", s["eyebrow"]),
+            para("Polynomial Regression", s["title"]),
+            para("Final methodology and validation results  |  Student BT2024146", s["subtitle"]),
+            para("1. Problem and data", s["section"]),
+            para(
+                "The assignment contains two separate supervised regression problems. Each model predicts the continuous target <b>y</b> from its assigned input features. "
+                "Both datasets contain 1,000 labeled training rows and 1,000 test rows. "
+                "<b>var1</b> has six features and permits polynomial degrees 1 to 10; "
+                "<b>var2</b> has three features and permits degrees 1 to 20. Test labels are unavailable, so no test-set error is reported.",
+                s["body"],
+            ),
+            para("2. Polynomial-regression methodology", s["section"]),
+            para(
+                "PolynomialFeatures expands the inputs to include monomials up to the candidate total degree. Ridge regression is evaluated across the full permitted degree range, with its penalty strength selected from the candidate values in the model-selection code. "
+                "Ordinary least-squares polynomial regression is also compared when the expanded design contains fewer than 800 terms. "
+                "The scaler is fitted separately on each fold's training partition and then applied to that fold's validation partition, preventing preprocessing leakage.",
+                s["body"],
+            ),
+            para("3. Validation and selection", s["section"]),
+        ]
+    )
+    validation_rows = [
+        [para("Validation setting", s["table_head"]), para("Configuration", s["table_head"])],
+        [para("Strategy", s["table"]), para(f"Repeated {validation['n_splits']}-fold cross-validation; {validation['n_repeats']} repeats ({fold_count} folds)", s["table"])],
+        [para("Randomization", s["table"]), para(f"{'Shuffled' if validation['shuffle'] else 'Unshuffled'} folds; random seed {validation['random_seed']}", s["table"])],
+        [para("Rows per fold", s["table"]), para(f"{train_rows} training rows and {validation_rows_count} validation rows", s["table"])],
+        [para("Selection", s["table"]), para("Lowest degree within one standard error of the minimum mean validation MSE", s["table"])],
+    ]
+    story.extend(
+        [
+            styled_table(validation_rows, [39 * mm, 130 * mm]),
+            Spacer(1, 5),
+            para("Final selected models", s["section"]),
+        ]
+    )
+    result_rows: list[list[Any]] = [
+        [
+            para("Problem", s["table_head"]),
+            para("Model", s["table_head"]),
+            para("Degree", s["table_head"]),
+            para("Alpha", s["table_head"]),
+            para("CV MSE", s["table_head"]),
+            para("CV R-squared", s["table_head"]),
+        ]
+    ]
+    for variable in ("var1", "var2"):
+        result = selected[variable]
+        result_rows.append(
+            [
+                para(variable, s["table"]),
+                para("Ridge polynomial", s["table"]),
+                para(str(result["degree"]), s["center"]),
+                para(f"{float(result['alpha']):g}", s["center"]),
+                para(fmt(result["mean_validation_mse"]), s["center"]),
+                para(fmt(result["mean_validation_r2"]), s["center"]),
+            ]
         )
-    else:
-        var2_selection_text = (
-            f"Degree {int(raw_min2['degree'])} achieved the lowest raw cross-validation MSE. "
-            f"Degree {int(selected2['degree'])} was selected using the one-standard-error rule because its "
-            "validation error was within one standard error of the minimum while requiring fewer terms."
+    story.extend([styled_table(result_rows, [20 * mm, 42 * mm, 19 * mm, 17 * mm, 30 * mm, 36 * mm]), Spacer(1, 5)])
+    story.append(
+        para(
+            "Degree 11 achieved the lowest raw cross-validation MSE. However, degree 10 was selected using the one-standard-error rule because its validation error was within one standard error of the minimum while requiring fewer polynomial terms.",
+            s["body"],
         )
-    story.append(Paragraph(var2_selection_text, styles["body"]))
-    story.append(Paragraph(
-        f"The raw minimum was {raw_min2['mean_validation_mse']:.6f} at degree "
-        f"{int(raw_min2['degree'])} (alpha {float(raw_min2['alpha']):g}, "
-        f"{int(raw_min2['polynomial_terms'])} terms). The selected degree-10 error was "
-        f"{selected2['mean_validation_mse']:.6f}, below the one-SE cutoff of "
-        f"{selected2['one_se_cutoff_mse']:.6f}.",
-        styles["small"],
-    ))
+    )
+    story.append(
+        para(
+            f"For var2, the raw minimum was {fmt(raw_min['mean_validation_mse'])} at degree 11; "
+            f"the selected degree 10 result was {fmt(selected['var2']['mean_validation_mse'])}, below the one-standard-error cutoff of {fmt(selected['var2']['one_se_cutoff_mse'])}. "
+            f"Degree 10 uses {int(var2_degree10['polynomial_terms'])} polynomial terms, compared with {int(var2_degree11['polynomial_terms'])} at degree 11.",
+            s["small"],
+        )
+    )
+    story.append(
+        para(
+            "The training-fold errors are lower than the validation errors for both selected models, showing a training-to-validation gap. Selection is therefore based on held-out fold performance and a lower-complexity degree preference, rather than training fit alone.",
+            s["small"],
+        )
+    )
 
-    ols_rows = [["Problem", "Best OLS degree", "CV MSE", "CV R-squared"]]
-    for name in PROBLEMS:
-        ols = cv[name][cv[name]["family"] == "OLS"].sort_values("mean_validation_mse").iloc[0]
-        ols_rows.append([
-            name, str(int(ols["degree"])), f"{ols['mean_validation_mse']:.6f}",
-            f"{ols['mean_validation_r2']:.6f}",
-        ])
-    story.append(Paragraph("OLS comparison and generalization", styles["h2"]))
-    story.append(make_table(ols_rows, [90, 130, 150, 145], styles, padding=4))
-    v1 = selections["var1"]["selected"]
-    v1_d10 = best_ridge(cv["var1"], 10)
-    v2_d11 = best_ridge(cv["var2"], 11)
-    v2_d15 = best_ridge(cv["var2"], 15)
-    story.append(Spacer(1, 4))
-    story.append(Paragraph(
-        f"Ridge improved on the best OLS candidate for both tasks. For var1, degree 10 had lower training "
-        f"MSE ({v1_d10['mean_training_mse']:.3f} vs {v1['mean_training_mse']:.3f} at selected degree 5) "
-        f"but higher validation MSE ({v1_d10['mean_validation_mse']:.3f} vs {v1['mean_validation_mse']:.3f}). "
-        f"For var2, from degree 11 to 15 training MSE fell ({v2_d11['mean_training_mse']:.3f} to "
-        f"{v2_d15['mean_training_mse']:.3f}) while validation MSE rose "
-        f"({v2_d11['mean_validation_mse']:.3f} to {v2_d15['mean_validation_mse']:.3f}).",
-        styles["small"],
-    ))
+    # Page 2: data checks, final inference, and reproducibility.
+    story.extend([PageBreak(), para("4. Final fitting and prediction files", s["section"])])
+    story.append(
+        para(
+            "After model selection, each selected polynomial Ridge pipeline is refitted using all 1,000 labeled rows for its problem. It then predicts the matching test dataset, preserving that file's row order. The two problems are trained and predicted independently.",
+            s["body"],
+        )
+    )
+    submission_rows = [
+        [para("File", s["table_head"]), para("Verification", s["table_head"])],
+        [
+            para("BT2024146_pred_var1.csv", s["table_small"]),
+            para(f"{prediction_counts['var1']:,} finite predictions; one column named y; no index column", s["table_small"]),
+        ],
+        [
+            para("BT2024146_pred_var2.csv", s["table_small"]),
+            para(f"{prediction_counts['var2']:,} finite predictions; one column named y; no index column", s["table_small"]),
+        ],
+    ]
+    story.extend([styled_table(submission_rows, [61 * mm, 103 * mm]), Spacer(1, 6)])
+    story.extend(
+        [
+            para("5. Input checks", s["section"]),
+            para(
+                f"The training and test feature schemas match for both problems. The supplied data contain no missing values. Across the supplied feature columns, values range from {fmt(feature_min)} to {fmt(feature_max)}. The prediction files were checked for their required single-column schema, 1,000-row count, and finite numeric values.",
+                s["body"],
+            ),
+            para("6. Reproducibility", s["section"]),
+            para(
+                "Place the five instructor-provided CSV files in the project's <b>data/</b> directory: the train and test files for var1 and var2, plus sample_submission.csv. These inputs and the assignment PDF are not required repository deliverables. Install the pinned packages from requirements.txt, then run the following from the repository root:",
+                s["body"],
+            ),
+            para(
+                "python src/train_and_predict.py<br/>python src/build_report.py",
+                ParagraphStyle(
+                    "Commands", parent=s["body"], fontName="Courier",
+                    fontSize=8.5, leading=13, leftIndent=8, textColor=INK,
+                    backColor=PALE_BLUE, borderColor=LIGHT_GREY, borderWidth=0.5,
+                    borderPadding=7, spaceAfter=8,
+                ),
+            ),
+            para(
+                "The first command runs degree and model selection, refits the selected models, writes the prediction CSVs, and saves validation and data-check results under outputs/. The second builds this report from those result files. See README.md for the complete Windows PowerShell environment setup and package installation commands.",
+                s["body"],
+            ),
+            para(
+                "Code locations: src/model_selection.py contains the fold-safe model search; src/train_and_predict.py performs data checks, final training, inference, and prediction-file validation; src/build_report.py generates this PDF from the saved results.",
+                s["small"],
+            ),
+        ]
+    )
 
-    story.append(Paragraph("Focused Ridge alpha refinement", styles["h2"]))
-    story.append(Paragraph(
-        "The local grids were var1: 1, 3, 5, 7, 10, 15, 20, 30, 50 and var2: "
-        "0.1, 0.3, 0.5, 0.7, 1, 1.5, 2, 3, 5. They used the same folds and fold-local scaling. "
-        "A candidate required at least 1% lower mean CV MSE and paired mean fold improvement greater "
-        "than its paired standard error to be adopted.",
-        styles["small"],
-    ))
-    refinement_rows = [["Problem", "Baseline / best alpha", "Best local MSE", "Relative gain", "Paired gain (SE)", "Decision"]]
-    for name in PROBLEMS:
-        refinement = selections[name]["alpha_refinement"]
-        refinement_rows.append([
-            name,
-            f"{refinement['baseline_alpha']:g} / {refinement['best_local_alpha']:g}",
-            f"{refinement['best_local_mean_validation_mse']:.6f}",
-            f"{100 * refinement['relative_mse_improvement']:.2f}%",
-            f"{refinement['paired_mean_mse_improvement']:.6g} ({refinement['paired_se_mse_improvement']:.3g})",
-            "Accepted" if refinement["meaningful_improvement"] else f"Kept {refinement['final_alpha']:g}",
-        ])
-    story.append(make_table(refinement_rows, [48, 100, 91, 75, 125, 84], styles, padding=4, font_size=6.8))
-    if selections["var1"]["alpha_refinement"]["full_search_rerun"]:
-        story.append(Paragraph(
-            "Var1 alpha 20 passed both safeguards, so its full degree search was rerun with the focused "
-            "values added. Var2 retained alpha 1 because its local improvement was not meaningful.",
-            styles["small"],
-        ))
-
-    story.append(Paragraph("Prediction and reproduction", styles["h2"]))
-    story.append(Paragraph(
-        "Each final model was fit on its full training set and predicted the matching test rows in their "
-        "original order. Both output files were checked for exactly one y column, 1,000 finite predictions, "
-        "and no index column: outputs/BT2024146_pred_var1.csv and outputs/BT2024146_pred_var2.csv. "
-        "No hidden-test score is reported. Place the five instructor CSVs in data/ "
-        "as listed in README.md, then run <font face='Courier'>python src/train_and_predict.py</font> and "
-        "<font face='Courier'>python src/build_report.py</font>. Code and artifacts: "
-        "<link href='https://github.com/Varun576253/ML_Assignment' color='#2F6B91'>GitHub repository</link>.",
-        styles["small"],
-    ))
-
-    doc.build(story, onFirstPage=decorate_page, onLaterPages=decorate_page)
-    return OUT_PDF
+    document.build(story, onFirstPage=page_chrome, onLaterPages=page_chrome)
+    return REPORT_PATH
 
 
 if __name__ == "__main__":
-    print(build())
+    print(f"Created {build_report()}")
